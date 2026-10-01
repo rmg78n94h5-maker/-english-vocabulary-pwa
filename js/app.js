@@ -10,7 +10,7 @@ import {
 } from './db.js';
 import { LIBRARY_WORDS } from './library.js';
 
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.2.1';
 const DAY = 86_400_000;
 
 const seedWords = [
@@ -946,7 +946,7 @@ function openAccountModal() {
         <div><span>✓</span><p><strong>Local-first</strong><small>Обучение продолжит работать офлайн, а изменения синхронизируются после подключения.</small></p></div>
         <div><span>→</span><p><strong>Следующий серверный этап</strong><small>Регистрацию и безопасную авторизацию подключим отдельным Cloudflare Worker и отдельной D1-базой английского приложения.</small></p></div>
       </div>
-      <p class="modal-note">Сейчас версия 0.2.0 честно работает в гостевом режиме и уже хранит данные в отдельной IndexedDB.</p>
+      <p class="modal-note">Сейчас версия 0.2.1 честно работает в гостевом режиме и уже хранит данные в отдельной IndexedDB.</p>
     </section>
   `;
   document.body.classList.add('modal-open');
