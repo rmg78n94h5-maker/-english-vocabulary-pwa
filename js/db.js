@@ -1,12 +1,13 @@
 const DB_NAME = 'englishVocabularyDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 const STORES = {
   words: { keyPath: 'id' },
   profile: { keyPath: 'id' },
   settings: { keyPath: 'id' },
   sessions: { keyPath: 'id' },
-  meta: { keyPath: 'key' }
+  meta: { keyPath: 'key' },
+  library: { keyPath: 'id' }
 };
 
 let dbPromise;
@@ -29,6 +30,11 @@ export function openDatabase() {
           }
           if (name === 'sessions') {
             store.createIndex('completedAt', 'completedAt', { unique: false });
+          }
+          if (name === 'library') {
+            store.createIndex('term', 'term', { unique: false });
+            store.createIndex('level', 'level', { unique: false });
+            store.createIndex('topic', 'topic', { unique: false });
           }
         }
       }
