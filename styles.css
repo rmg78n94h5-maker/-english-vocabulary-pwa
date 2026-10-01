@@ -413,3 +413,26 @@ p { color: var(--muted); line-height: 1.55; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
 }
+
+.library-hero { background:linear-gradient(145deg,#eff6ff,#f0fdfa); border:1px solid var(--line); border-radius:var(--radius-lg); padding:20px; display:flex; gap:16px; align-items:center; box-shadow:var(--shadow-soft); }
+.library-hero h2 { margin:4px 0 6px; }
+.library-hero p { margin:0; font-size:13px; }
+.library-count { flex:0 0 auto; width:58px; height:58px; border-radius:20px; background:white; color:var(--blue); display:grid; place-items:center; font-size:20px; font-weight:900; box-shadow:var(--shadow-soft); }
+.library-pack-button { width:100%; padding:13px; }
+.library-list { display:grid; gap:12px; }
+.library-card { background:rgba(255,255,255,.95); border:1px solid var(--line); border-radius:22px; padding:16px; box-shadow:var(--shadow-soft); }
+.library-word-head { display:flex; align-items:center; gap:11px; }
+.library-word-head h3 { margin:0; font-size:20px; }
+.library-word-head p { margin:2px 0 0; font-size:13px; }
+.cefr-badge { min-width:40px; height:40px; padding:0 7px; border-radius:13px; display:grid; place-items:center; font-weight:900; font-size:11px; }
+.cefr-a1 { background:var(--teal-soft); color:#0f766e; } .cefr-a2 { background:var(--blue-soft); color:#1d4ed8; }
+.cefr-b1 { background:var(--yellow-soft); color:#92400e; } .cefr-b2 { background:var(--violet-soft); color:#6d28d9; }
+.cefr-c1 { background:#fee2e2; color:#b91c1c; }
+.library-meta { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0; }
+.library-meta span { background:var(--surface-soft); border-radius:99px; padding:5px 8px; color:var(--muted); font-size:10px; font-weight:700; }
+.library-example { border-left:3px solid var(--teal); padding-left:11px; display:grid; gap:3px; margin-bottom:13px; }
+.library-example strong { font-size:13px; } .library-example small { color:var(--muted); font-size:11px; }
+.library-add,.library-added { width:100%; border:0; border-radius:14px; padding:11px; font-weight:900; }
+.library-add { background:var(--blue); color:white; } .library-added { background:var(--teal-soft); color:#0f766e; }
+.library-added:disabled { opacity:1; }
+@media (max-width:430px){ .bottom-nav { gap:1px; padding-left:6px; padding-right:6px; } .nav-item { min-width:0; padding-left:4px; padding-right:4px; } .nav-item small { font-size:8px; } }
