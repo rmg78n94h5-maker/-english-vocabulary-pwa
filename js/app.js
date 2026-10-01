@@ -9,7 +9,7 @@ import {
   importDatabase
 } from './db.js';
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.1.1';
 const DAY = 86_400_000;
 
 const seedWords = [
@@ -840,7 +840,7 @@ function openAccountModal() {
         <div><span>✓</span><p><strong>Local-first</strong><small>Обучение продолжит работать офлайн, а изменения синхронизируются после подключения.</small></p></div>
         <div><span>→</span><p><strong>Следующий серверный этап</strong><small>Регистрацию и безопасную авторизацию подключим отдельным Cloudflare Worker и отдельной D1-базой английского приложения.</small></p></div>
       </div>
-      <p class="modal-note">Сейчас версия 0.1.0 честно работает в гостевом режиме и уже хранит данные в отдельной IndexedDB.</p>
+      <p class="modal-note">Сейчас версия 0.1.1 честно работает в гостевом режиме и уже хранит данные в отдельной IndexedDB.</p>
     </section>
   `;
   document.body.classList.add('modal-open');
@@ -947,29 +947,45 @@ async function resetDemoProgress() {
 async function registerServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
   try {
-    const registration = await navigator.serviceWorker.register('./sw.js');
-    if (registration.waiting) {
-      state.waitingServiceWorker = registration.waiting;
+    const registration = await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' });
+    let reloading = false;
+
+    const showWaitingUpdate = (worker) => {
+      if (!worker || worker.state !== 'installed' || !navigator.serviceWorker.controller) return;
+      state.waitingServiceWorker = worker;
       updateBanner.hidden = false;
-    }
+    };
+
+    if (registration.waiting) showWaitingUpdate(registration.waiting);
+
     registration.addEventListener('updatefound', () => {
       const worker = registration.installing;
-      worker?.addEventListener('statechange', () => {
-        if (worker.state === 'installed' && navigator.serviceWorker.controller) {
-          state.waitingServiceWorker = worker;
-          updateBanner.hidden = false;
-        }
-      });
+      worker?.addEventListener('statechange', () => showWaitingUpdate(worker));
     });
-    navigator.serviceWorker.addEventListener('controllerchange', () => window.location.reload());
+
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloading) return;
+      reloading = true;
+      updateBanner.hidden = true;
+      window.location.reload();
+    });
+
+    if (navigator.onLine) {
+      registration.update().catch(() => {});
+    }
   } catch (error) {
     console.warn('Service Worker registration failed', error);
   }
 }
 
 function applyUpdate() {
-  if (!state.waitingServiceWorker) return;
-  state.waitingServiceWorker.postMessage({ type: 'SKIP_WAITING' });
+  const worker = state.waitingServiceWorker;
+  if (!worker) {
+    updateBanner.hidden = true;
+    return;
+  }
+  updateBanner.hidden = true;
+  worker.postMessage({ type: 'SKIP_WAITING' });
 }
 
 bootstrap().catch((error) => {
