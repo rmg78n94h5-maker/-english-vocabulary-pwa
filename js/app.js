@@ -8,8 +8,9 @@ import {
   exportDatabase,
   importDatabase
 } from './db.js';
+import { LIBRARY_WORDS } from './library.js';
 
-const APP_VERSION = '0.1.1';
+const APP_VERSION = '0.2.0';
 const DAY = 86_400_000;
 
 const seedWords = [
@@ -88,6 +89,9 @@ const state = {
   settings: { ...defaultSettings },
   search: '',
   category: 'Все',
+  librarySearch: '',
+  libraryLevel: 'Все',
+  libraryTopic: 'Все',
   session: null,
   deferredInstallPrompt: null,
   waitingServiceWorker: null
@@ -230,6 +234,10 @@ async function handleClick(event) {
     case 'close-modal': closeModal(); break;
     case 'open-level': openLevelModal(); break;
     case 'set-category': state.category = actionElement.dataset.category; renderDictionary(); break;
+    case 'set-library-level': state.libraryLevel = actionElement.dataset.level; renderLibrary(); break;
+    case 'set-library-topic': state.libraryTopic = actionElement.dataset.topic; renderLibrary(); break;
+    case 'add-library-word': await addLibraryWord(id); break;
+    case 'add-library-pack': await addLibraryPack(); break;
     case 'export-data': await exportData(); break;
     case 'trigger-import': document.querySelector('#importFile')?.click(); break;
     case 'install-app': await installApp(); break;
@@ -245,6 +253,10 @@ function handleInput(event) {
   if (event.target.matches('#dictionarySearch')) {
     state.search = event.target.value;
     renderDictionary();
+  }
+  if (event.target.matches('#librarySearch')) {
+    state.librarySearch = event.target.value;
+    renderLibrary();
   }
 }
 
@@ -280,6 +292,7 @@ function navigate(route) {
 function render() {
   switch (state.route) {
     case 'dictionary': renderDictionary(); break;
+    case 'library': renderLibrary(); break;
     case 'study': renderStudy(); break;
     case 'progress': renderProgress(); break;
     case 'profile': renderProfile(); break;
@@ -394,6 +407,99 @@ function renderDictionary() {
       ${filtered.length ? filtered.map(wordCard).join('') : emptyState('Ничего не найдено', 'Попробуйте другой запрос или добавьте новое слово.')}
     </section>
   `;
+}
+
+function renderLibrary() {
+  const levels = ['Все', 'A1', 'A2', 'B1', 'B2', 'C1'];
+  const topics = ['Все', ...new Set(LIBRARY_WORDS.map((word) => word.topic))];
+  const query = state.librarySearch.trim().toLowerCase();
+  const personalTerms = new Set(state.words.map((word) => word.term.trim().toLowerCase()));
+  const filtered = LIBRARY_WORDS.filter((word) => {
+    const levelOk = state.libraryLevel === 'Все' || word.level === state.libraryLevel;
+    const topicOk = state.libraryTopic === 'Все' || word.topic === state.libraryTopic;
+    const haystack = `${word.term} ${word.translation} ${word.example} ${word.topic}`.toLowerCase();
+    return levelOk && topicOk && (!query || haystack.includes(query));
+  });
+
+  view.innerHTML = `
+    <section class="page-title-row">
+      <div><span class="eyebrow">Общая учебная база</span><h1>Библиотека</h1><p>${LIBRARY_WORDS.length} проверенных слов и фраз · A1–C1</p></div>
+    </section>
+    <section class="library-hero">
+      <div><span class="eyebrow">Стартовая коллекция</span><h2>Выберите то, что хотите учить</h2><p>Библиотека не засоряет личный словарь. Слово попадает в занятия только после добавления.</p></div>
+      <span class="library-count">${filtered.length}</span>
+    </section>
+    <label class="search-box"><span>⌕</span><input id="librarySearch" type="search" value="${escapeHtml(state.librarySearch)}" placeholder="Найти слово, перевод или тему" autocomplete="off"></label>
+    <div class="chip-row" aria-label="Уровни CEFR">
+      ${levels.map((level) => `<button type="button" class="chip ${level === state.libraryLevel ? 'is-active' : ''}" data-action="set-library-level" data-level="${level}">${level}</button>`).join('')}
+    </div>
+    <div class="chip-row" aria-label="Темы">
+      ${topics.map((topic) => `<button type="button" class="chip ${topic === state.libraryTopic ? 'is-active' : ''}" data-action="set-library-topic" data-topic="${escapeHtml(topic)}">${escapeHtml(topic)}</button>`).join('')}
+    </div>
+    <button type="button" class="secondary-button library-pack-button" data-action="add-library-pack">＋ Добавить показанные (${filtered.filter(w => !personalTerms.has(w.term.toLowerCase())).length})</button>
+    <section class="library-list">
+      ${filtered.length ? filtered.map((word) => libraryCard(word, personalTerms.has(word.term.toLowerCase()))).join('') : emptyState('Ничего не найдено', 'Измените уровень, тему или поисковый запрос.')}
+    </section>
+  `;
+}
+
+function libraryCard(word, added) {
+  return `
+    <article class="library-card">
+      <div class="library-word-head">
+        <span class="cefr-badge cefr-${word.level.toLowerCase()}">${word.level}</span>
+        <div class="grow"><h3>${escapeHtml(word.term)}</h3><p>${escapeHtml(word.translation)}</p></div>
+        <button type="button" class="icon-button" data-action="speak" data-text="${escapeHtml(word.term)}" aria-label="Прослушать">🔊</button>
+      </div>
+      <div class="library-meta"><span>${escapeHtml(word.transcription)}</span><span>${escapeHtml(word.partOfSpeech)}</span><span>${escapeHtml(word.topic)}</span></div>
+      <div class="library-example"><strong>${escapeHtml(word.example)}</strong><small>${escapeHtml(word.exampleTranslation)}</small></div>
+      <button type="button" class="${added ? 'library-added' : 'library-add'}" data-action="add-library-word" data-id="${word.id}" ${added ? 'disabled' : ''}>${added ? '✓ Уже в словаре' : '＋ В мой словарь'}</button>
+    </article>
+  `;
+}
+
+async function addLibraryWord(id, silent = false) {
+  const source = LIBRARY_WORDS.find((word) => word.id === id);
+  if (!source) return false;
+  if (state.words.some((word) => word.term.trim().toLowerCase() === source.term.toLowerCase())) {
+    if (!silent) showToast('Это слово уже есть в вашем словаре');
+    return false;
+  }
+  const now = new Date().toISOString();
+  const word = normalizeWord({
+    ...source,
+    id: uid(),
+    libraryId: source.id,
+    category: source.topic,
+    status: 'new',
+    favorite: false,
+    important: false,
+    createdAt: now,
+    updatedAt: now,
+    nextReviewAt: now,
+    syncState: 'pending'
+  });
+  await putOne('words', word);
+  state.words.unshift(word);
+  if (!silent) {
+    showToast('Добавлено в личный словарь');
+    renderLibrary();
+  }
+  return true;
+}
+
+async function addLibraryPack() {
+  const query = state.librarySearch.trim().toLowerCase();
+  const candidates = LIBRARY_WORDS.filter((word) => {
+    const levelOk = state.libraryLevel === 'Все' || word.level === state.libraryLevel;
+    const topicOk = state.libraryTopic === 'Все' || word.topic === state.libraryTopic;
+    const haystack = `${word.term} ${word.translation} ${word.example} ${word.topic}`.toLowerCase();
+    return levelOk && topicOk && (!query || haystack.includes(query));
+  });
+  let added = 0;
+  for (const word of candidates) if (await addLibraryWord(word.id, true)) added += 1;
+  showToast(added ? `Добавлено: ${added}` : 'Все показанные слова уже добавлены');
+  renderLibrary();
 }
 
 function wordCard(word) {
@@ -840,7 +946,7 @@ function openAccountModal() {
         <div><span>✓</span><p><strong>Local-first</strong><small>Обучение продолжит работать офлайн, а изменения синхронизируются после подключения.</small></p></div>
         <div><span>→</span><p><strong>Следующий серверный этап</strong><small>Регистрацию и безопасную авторизацию подключим отдельным Cloudflare Worker и отдельной D1-базой английского приложения.</small></p></div>
       </div>
-      <p class="modal-note">Сейчас версия 0.1.1 честно работает в гостевом режиме и уже хранит данные в отдельной IndexedDB.</p>
+      <p class="modal-note">Сейчас версия 0.2.0 честно работает в гостевом режиме и уже хранит данные в отдельной IndexedDB.</p>
     </section>
   `;
   document.body.classList.add('modal-open');
