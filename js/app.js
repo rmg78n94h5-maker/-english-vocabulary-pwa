@@ -10,7 +10,7 @@ import {
 } from './db.js';
 import { LIBRARY_WORDS } from './library.js';
 
-const APP_VERSION = '0.2.2';
+const APP_VERSION = '0.2.3';
 const DAY = 86_400_000;
 
 const seedWords = [
@@ -232,6 +232,8 @@ async function handleClick(event) {
     case 'close-modal': closeModal(); break;
     case 'open-level': openLevelModal(); break;
     case 'set-category': state.category = actionElement.dataset.category; renderDictionary(); break;
+    case 'open-library': navigate('library'); break;
+    case 'go-dictionary': navigate('dictionary'); break;
     case 'set-library-level': state.libraryLevel = actionElement.dataset.level; renderLibrary(); break;
     case 'set-library-topic': state.libraryTopic = actionElement.dataset.topic; renderLibrary(); break;
     case 'add-library-word': await addLibraryWord(id); break;
@@ -279,8 +281,9 @@ async function handleChange(event) {
 
 function navigate(route) {
   state.route = route;
+  const activeRoute = route === 'library' ? 'dictionary' : route;
   document.querySelectorAll('.nav-item').forEach((button) => {
-    button.classList.toggle('is-active', button.dataset.route === route);
+    button.classList.toggle('is-active', button.dataset.route === activeRoute);
   });
   render();
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -394,6 +397,12 @@ function renderDictionary() {
       <button class="round-action" type="button" data-action="add-word" aria-label="Добавить слово">＋</button>
     </section>
 
+    <button type="button" class="library-entry" data-action="open-library">
+      <span class="library-entry-icon">◫</span>
+      <span class="grow"><strong>Библиотека слов</strong><small>Готовые наборы A1–C1 · ${LIBRARY_WORDS.length} слов и фраз</small></span>
+      <b>›</b>
+    </button>
+
     <label class="search-box"><span>⌕</span><input id="dictionarySearch" type="search" value="${escapeHtml(state.search)}" placeholder="Поиск слов и фраз" autocomplete="off"></label>
 
     <div class="chip-row" aria-label="Категории">
@@ -419,8 +428,9 @@ function renderLibrary() {
   });
 
   view.innerHTML = `
-    <section class="page-title-row">
+    <section class="page-title-row library-title-row">
       <div><span class="eyebrow">Общая учебная база</span><h1>Библиотека</h1><p>${LIBRARY_WORDS.length} проверенных слов и фраз · A1–C1</p></div>
+      <button type="button" class="back-dictionary-button" data-action="go-dictionary" aria-label="Вернуться в словарь">←</button>
     </section>
     <section class="library-hero">
       <div><span class="eyebrow">Стартовая коллекция</span><h2>Выберите то, что хотите учить</h2><p>Библиотека не засоряет личный словарь. Слово попадает в занятия только после добавления.</p></div>
