@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "english-vocabulary-api",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-01",
+  "vars": {
+    "ALLOWED_ORIGINS": "https://rmg78n94h5-maker.github.io"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "english-vocabulary-db",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID"
+    }
+  ]
+}
