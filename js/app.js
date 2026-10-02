@@ -9,8 +9,18 @@ import {
   importDatabase
 } from './db.js';
 import { LIBRARY_WORDS } from './library.js';
+import { AUTH_API_BASE_URL } from './config.js';
+import {
+  authConfigured,
+  loadAuthSession,
+  clearAuthSession,
+  registerAccount,
+  loginAccount,
+  fetchCurrentUser,
+  logoutAccountRemote
+} from './auth.js';
 
-const APP_VERSION = '0.2.3';
+const APP_VERSION = '0.3.0';
 const DAY = 86_400_000;
 
 const seedWords = [
@@ -78,7 +88,7 @@ const defaultSettings = {
   autoPlay: false,
   theme: 'light',
   syncEnabled: false,
-  apiBaseUrl: ''
+  apiBaseUrl: AUTH_API_BASE_URL
 };
 
 const state = {
@@ -185,6 +195,8 @@ async function bootstrap() {
   if (!storedProfile) await putOne('profile', state.profile);
   if (!storedSettings) await putOne('settings', state.settings);
 
+  await restoreAuthState();
+
   bindEvents();
   updateConnectionState();
   updateHeader();
@@ -242,6 +254,9 @@ async function handleClick(event) {
     case 'trigger-import': document.querySelector('#importFile')?.click(); break;
     case 'install-app': await installApp(); break;
     case 'account-info': openAccountModal(); break;
+    case 'auth-mode': openAccountModal(actionElement.dataset.mode || 'login'); break;
+    case 'submit-auth': await submitAuthForm(actionElement.dataset.mode || 'login'); break;
+    case 'logout-account': await logoutAccount(); break;
     case 'finish-session': finishSessionView(); break;
     case 'reset-demo': await resetDemoProgress(); break;
     default: break;
@@ -782,17 +797,27 @@ function sessionsLastDays(days) {
 
 function renderProfile() {
   const level = levelData(state.profile.totalXp || 0);
+  const connected = state.profile.accountStatus === 'authenticated';
+  const serverReady = authConfigured(state.settings.apiBaseUrl);
+
   view.innerHTML = `
     <section class="profile-hero">
       <div class="avatar">${escapeHtml((state.profile.displayName || 'Г').slice(0, 1).toUpperCase())}</div>
-      <div><span class="eyebrow">Профиль</span><h1>${escapeHtml(state.profile.displayName)}</h1><p>${state.profile.accountStatus === 'guest' ? 'Гостевой режим · данные хранятся локально' : escapeHtml(state.profile.email)}</p></div>
+      <div><span class="eyebrow">Профиль</span><h1>${escapeHtml(state.profile.displayName)}</h1><p>${connected ? escapeHtml(state.profile.email) : 'Гостевой режим · данные хранятся локально'}</p></div>
       <span class="profile-level">${level.rank.icon} ${level.level}</span>
     </section>
 
-    <section class="account-card">
-      <span class="account-icon">☁</span>
-      <div class="grow"><strong>${state.profile.accountStatus === 'guest' ? 'Подключите аккаунт' : 'Синхронизация включена'}</strong><p>${state.profile.accountStatus === 'guest' ? 'Регистрация, восстановление и синхронизация между устройствами предусмотрены архитектурой проекта.' : 'Изменения сохраняются локально и синхронизируются с сервером.'}</p></div>
-      <button type="button" class="secondary-button" data-action="account-info">${state.profile.accountStatus === 'guest' ? 'Подробнее' : 'Управление'}</button>
+    <section class="account-card ${connected ? 'is-connected' : ''}">
+      <span class="account-icon">${connected ? '✓' : '☁'}</span>
+      <div class="grow">
+        <strong>${connected ? 'Аккаунт подключён' : 'Подключите аккаунт'}</strong>
+        <p>${connected
+          ? 'Вход уже работает. Слова и прогресс остаются локально; облачную синхронизацию подключим следующим этапом.'
+          : serverReady
+            ? 'Войдите или создайте аккаунт. Текущий словарь и прогресс на устройстве сохранятся.'
+            : 'Экран аккаунта готов. Для настоящего входа осталось подключить отдельный Cloudflare Worker и D1.'}</p>
+      </div>
+      <button type="button" class="secondary-button" data-action="account-info">${connected ? 'Управление' : 'Войти'}</button>
     </section>
 
     <section class="settings-panel">
@@ -812,7 +837,7 @@ function renderProfile() {
       <input id="importFile" type="file" accept="application/json" hidden>
     </section>
 
-    <section class="version-card"><span>English Vocabulary</span><strong>Версия ${APP_VERSION}</strong><small>Локальная база IndexedDB · PWA offline-first</small></section>
+    <section class="version-card"><span>English Vocabulary</span><strong>Версия ${APP_VERSION}</strong><small>IndexedDB · PWA offline-first · ${serverReady ? 'Auth API подключён' : 'Auth API ожидает подключения'}</small></section>
   `;
 }
 
@@ -942,21 +967,197 @@ function openLevelModal() {
   document.body.classList.add('modal-open');
 }
 
-function openAccountModal() {
+function openAccountModal(mode = 'login') {
+  const connected = state.profile.accountStatus === 'authenticated';
+  const configured = authConfigured(state.settings.apiBaseUrl);
+
+  if (connected) {
+    modalRoot.innerHTML = `
+      <div class="modal-backdrop" data-action="close-modal"></div>
+      <section class="modal-sheet compact-sheet" role="dialog" aria-modal="true">
+        <div class="modal-handle"></div>
+        <header><div><span class="eyebrow">Аккаунт</span><h2>Вы вошли</h2></div><button type="button" class="icon-button" data-action="close-modal">×</button></header>
+        <div class="auth-connected">
+          <div class="auth-avatar">${escapeHtml((state.profile.displayName || 'U').slice(0,1).toUpperCase())}</div>
+          <div><strong>${escapeHtml(state.profile.displayName)}</strong><small>${escapeHtml(state.profile.email)}</small></div>
+        </div>
+        <div class="feature-stack">
+          <div><span>✓</span><p><strong>Локальные данные сохранены</strong><small>Ваш словарь, XP и история занятий остались в IndexedDB этого устройства.</small></p></div>
+          <div><span>→</span><p><strong>Следом — синхронизация</strong><small>В следующем серверном этапе свяжем локальные изменения с этим аккаунтом на всех устройствах.</small></p></div>
+        </div>
+        <button type="button" class="danger-button" data-action="logout-account">Выйти из аккаунта</button>
+      </section>
+    `;
+    document.body.classList.add('modal-open');
+    return;
+  }
+
+  const registerMode = mode === 'register';
   modalRoot.innerHTML = `
     <div class="modal-backdrop" data-action="close-modal"></div>
     <section class="modal-sheet compact-sheet" role="dialog" aria-modal="true">
       <div class="modal-handle"></div>
-      <header><div><span class="eyebrow">Многопользовательская архитектура</span><h2>Аккаунты и синхронизация</h2></div><button type="button" class="icon-button" data-action="close-modal">×</button></header>
-      <div class="feature-stack">
-        <div><span>✓</span><p><strong>Раздельные данные</strong><small>У каждого аккаунта будет собственный словарь, прогресс и настройки.</small></p></div>
-        <div><span>✓</span><p><strong>Local-first</strong><small>Обучение продолжит работать офлайн, а изменения синхронизируются после подключения.</small></p></div>
-        <div><span>→</span><p><strong>Следующий серверный этап</strong><small>Регистрацию и безопасную авторизацию подключим отдельным Cloudflare Worker и отдельной D1-базой английского приложения.</small></p></div>
+      <header><div><span class="eyebrow">Аккаунт</span><h2>${registerMode ? 'Создать аккаунт' : 'Войти'}</h2></div><button type="button" class="icon-button" data-action="close-modal">×</button></header>
+
+      <div class="auth-tabs">
+        <button type="button" class="${!registerMode ? 'is-active' : ''}" data-action="auth-mode" data-mode="login">Войти</button>
+        <button type="button" class="${registerMode ? 'is-active' : ''}" data-action="auth-mode" data-mode="register">Регистрация</button>
       </div>
-      <p class="modal-note">Сейчас версия 0.2.2 честно работает в гостевом режиме и уже хранит данные в отдельной IndexedDB.</p>
+
+      ${configured ? '' : `
+        <div class="auth-server-note">
+          <strong>Сервер аккаунтов ещё не подключён</strong>
+          <small>Интерфейс и серверный код уже готовы. Осталось один раз создать отдельные Cloudflare Worker + D1 и прописать адрес API.</small>
+        </div>
+      `}
+
+      <form id="authForm" class="auth-form" onsubmit="return false" autocomplete="on">
+        ${registerMode ? authField('Имя', 'displayName', 'text', 'Никита', 'name') : ''}
+        ${authField('Email', 'email', 'email', 'name@example.com', 'email')}
+        ${authField('Пароль', 'password', 'password', 'Минимум 8 символов', registerMode ? 'new-password' : 'current-password')}
+        ${registerMode ? authField('Повторите пароль', 'confirmPassword', 'password', 'Ещё раз', 'new-password') : ''}
+        <p class="auth-preserve-note">Ваш текущий словарь и прогресс <strong>не удаляются</strong> при входе или регистрации.</p>
+        <button type="button" class="primary-cta auth-submit" data-action="submit-auth" data-mode="${registerMode ? 'register' : 'login'}" ${configured ? '' : 'disabled'}>
+          <span><small>${registerMode ? 'Новый аккаунт' : 'Существующий аккаунт'}</small><strong>${registerMode ? 'Создать аккаунт' : 'Войти'}</strong></span>
+          <span class="cta-arrow">→</span>
+        </button>
+      </form>
     </section>
   `;
   document.body.classList.add('modal-open');
+}
+
+function authField(label, name, type, placeholder, autocomplete) {
+  return `<label class="form-field"><span>${label}</span><input name="${name}" type="${type}" placeholder="${placeholder}" autocomplete="${autocomplete}" required></label>`;
+}
+
+async function restoreAuthState() {
+  const session = await loadAuthSession();
+  if (!session?.token || !session?.user) {
+    if (state.profile.accountStatus === 'authenticated') {
+      state.profile.accountStatus = 'guest';
+      state.profile.email = '';
+      delete state.profile.accountUserId;
+      await putOne('profile', state.profile);
+    }
+    return;
+  }
+
+  applyAuthenticatedUser(session.user, false);
+
+  if (!navigator.onLine || !authConfigured(state.settings.apiBaseUrl)) return;
+
+  try {
+    const payload = await fetchCurrentUser(state.settings.apiBaseUrl, session.token);
+    applyAuthenticatedUser(payload.user, false);
+    await putOne('profile', state.profile);
+  } catch (error) {
+    if (error.status === 401) {
+      await clearAuthSession();
+      state.profile.accountStatus = 'guest';
+      state.profile.email = '';
+      delete state.profile.accountUserId;
+      await putOne('profile', state.profile);
+    }
+  }
+}
+
+function applyAuthenticatedUser(user, persist = true) {
+  state.profile = {
+    ...state.profile,
+    accountStatus: 'authenticated',
+    accountUserId: user.id,
+    displayName: user.displayName || state.profile.displayName || 'Пользователь',
+    email: user.email || '',
+    syncState: 'pending'
+  };
+  if (persist) return putOne('profile', state.profile);
+}
+
+async function submitAuthForm(mode) {
+  const form = document.querySelector('#authForm');
+  if (!form) return;
+  if (!navigator.onLine) {
+    showToast('Для первого входа нужен интернет');
+    return;
+  }
+  if (!authConfigured(state.settings.apiBaseUrl)) {
+    showToast('Сервер аккаунтов ещё не подключён');
+    return;
+  }
+
+  const data = new FormData(form);
+  const email = String(data.get('email') || '').trim();
+  const password = String(data.get('password') || '');
+  const button = form.querySelector('.auth-submit');
+
+  if (!email || !password) {
+    showToast('Заполните email и пароль');
+    return;
+  }
+  if (password.length < 8) {
+    showToast('Пароль должен быть не короче 8 символов');
+    return;
+  }
+
+  let displayName = '';
+  if (mode === 'register') {
+    displayName = String(data.get('displayName') || '').trim();
+    const confirmPassword = String(data.get('confirmPassword') || '');
+    if (displayName.length < 2) {
+      showToast('Введите имя');
+      return;
+    }
+    if (password !== confirmPassword) {
+      showToast('Пароли не совпадают');
+      return;
+    }
+  }
+
+  const original = button?.innerHTML;
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = '<span><small>Связываемся с сервером</small><strong>Подождите…</strong></span><span class="cta-arrow">…</span>';
+  }
+
+  try {
+    const payload = mode === 'register'
+      ? await registerAccount(state.settings.apiBaseUrl, { displayName, email, password })
+      : await loginAccount(state.settings.apiBaseUrl, { email, password });
+
+    await applyAuthenticatedUser(payload.user);
+    closeModal();
+    showToast(mode === 'register' ? 'Аккаунт создан' : 'Вход выполнен');
+    render();
+  } catch (error) {
+    showToast(error.message || 'Не удалось войти');
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = original;
+    }
+  }
+}
+
+async function logoutAccount() {
+  const session = await loadAuthSession();
+  try {
+    if (navigator.onLine && session?.token) {
+      await logoutAccountRemote(state.settings.apiBaseUrl, session.token);
+    }
+  } catch {
+    // Локальный выход всё равно выполняется.
+  }
+
+  await clearAuthSession();
+  state.profile.accountStatus = 'guest';
+  state.profile.displayName = 'Гость';
+  state.profile.email = '';
+  state.profile.syncState = 'local';
+  delete state.profile.accountUserId;
+  await putOne('profile', state.profile);
+  closeModal();
+  showToast('Вы вышли из аккаунта');
+  render();
 }
 
 function speak(text) {
