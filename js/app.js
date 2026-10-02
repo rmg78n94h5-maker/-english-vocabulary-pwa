@@ -9,18 +9,7 @@ import {
   importDatabase
 } from './db.js';
 import { LIBRARY_WORDS } from './library.js';
-import { AUTH_API_BASE_URL } from './config.js';
-import {
-  authConfigured,
-  loadAuthSession,
-  clearAuthSession,
-  registerAccount,
-  loginAccount,
-  fetchCurrentUser,
-  logoutAccountRemote
-} from './auth.js';
-
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.4.0';
 const DAY = 86_400_000;
 
 const seedWords = [
@@ -81,14 +70,15 @@ const defaultProfile = {
 
 const defaultSettings = {
   id: 'main',
-  newWordsPerDay: 10,
+  newWordsPerDay: 5,
   sessionLength: 12,
   voiceLang: 'en-US',
   speechRate: 0.85,
   autoPlay: false,
   theme: 'light',
-  syncEnabled: false,
-  apiBaseUrl: AUTH_API_BASE_URL
+  smartNewWords: true,
+  learningLevel: 'A1-B1',
+  syncEnabled: false
 };
 
 const state = {
@@ -159,16 +149,31 @@ function levelData(totalXp) {
 }
 
 function normalizeWord(word) {
-  return {
+  const normalized = {
     intervalDays: 0,
+    stabilityDays: 0,
+    difficulty: 0.5,
+    mastery: 0,
     correctCount: 0,
     wrongCount: 0,
+    lapses: 0,
+    consecutiveCorrect: 0,
+    seenCount: 0,
+    introducedAt: null,
+    lastPresentedAt: null,
+    lastSessionId: null,
+    lastExercise: '',
     favorite: false,
     important: false,
     status: 'new',
+    source: 'manual',
     syncState: 'local',
     ...word
   };
+  normalized.seenCount = Number(normalized.seenCount || 0) || Number(normalized.correctCount || 0) + Number(normalized.wrongCount || 0);
+  normalized.stabilityDays = Number(normalized.stabilityDays || normalized.intervalDays || 0);
+  normalized.mastery = Number(normalized.mastery || calculateMastery(normalized));
+  return normalized;
 }
 
 async function bootstrap() {
@@ -195,7 +200,6 @@ async function bootstrap() {
   if (!storedProfile) await putOne('profile', state.profile);
   if (!storedSettings) await putOne('settings', state.settings);
 
-  await restoreAuthState();
 
   bindEvents();
   updateConnectionState();
@@ -233,8 +237,10 @@ async function handleClick(event) {
   switch (action) {
     case 'go-today': navigate('today'); break;
     case 'start-session': await startSession(); break;
-    case 'reveal-answer': revealAnswer(); break;
-    case 'rate-answer': await rateAnswer(actionElement.dataset.rating); break;
+    case 'answer-option': await answerOption(Number(actionElement.dataset.option)); break;
+    case 'check-typing': await checkTypingAnswer(); break;
+    case 'next-task': await advanceStudyTask(); break;
+    case 'intro-next': await finishIntroTask(); break;
     case 'speak': speak(actionElement.dataset.text || ''); break;
     case 'add-word': openWordModal(); break;
     case 'edit-word': openWordModal(state.words.find((word) => word.id === id)); break;
@@ -253,10 +259,6 @@ async function handleClick(event) {
     case 'export-data': await exportData(); break;
     case 'trigger-import': document.querySelector('#importFile')?.click(); break;
     case 'install-app': await installApp(); break;
-    case 'account-info': openAccountModal(); break;
-    case 'auth-mode': openAccountModal(actionElement.dataset.mode || 'login'); break;
-    case 'submit-auth': await submitAuthForm(actionElement.dataset.mode || 'login'); break;
-    case 'logout-account': await logoutAccount(); break;
     case 'finish-session': finishSessionView(); break;
     case 'reset-demo': await resetDemoProgress(); break;
     default: break;
@@ -277,9 +279,10 @@ function handleInput(event) {
 async function handleChange(event) {
   if (event.target.matches('[data-setting]')) {
     const key = event.target.dataset.setting;
+    const numericSettings = new Set(['newWordsPerDay', 'sessionLength', 'speechRate']);
     const value = event.target.type === 'checkbox'
       ? event.target.checked
-      : event.target.type === 'number' || event.target.tagName === 'SELECT' && key !== 'voiceLang'
+      : numericSettings.has(key)
         ? Number(event.target.value)
         : event.target.value;
     state.settings[key] = value;
@@ -444,7 +447,7 @@ function renderLibrary() {
 
   view.innerHTML = `
     <section class="page-title-row library-title-row">
-      <div><span class="eyebrow">Общая учебная база</span><h1>Библиотека</h1><p>${LIBRARY_WORDS.length} проверенных слов и фраз · A1–C1</p></div>
+      <div><span class="eyebrow">Общая учебная база</span><h1>Библиотека</h1><p>${LIBRARY_WORDS.length} слов и фраз · A1–C1</p></div>
       <button type="button" class="back-dictionary-button" data-action="go-dictionary" aria-label="Вернуться в словарь">←</button>
     </section>
     <section class="library-hero">
@@ -473,8 +476,8 @@ function libraryCard(word, added) {
         <div class="grow"><h3>${escapeHtml(word.term)}</h3><p>${escapeHtml(word.translation)}</p></div>
         <button type="button" class="icon-button" data-action="speak" data-text="${escapeHtml(word.term)}" aria-label="Прослушать">🔊</button>
       </div>
-      <div class="library-meta"><span>${escapeHtml(word.transcription)}</span><span>${escapeHtml(word.partOfSpeech)}</span><span>${escapeHtml(word.topic)}</span></div>
-      <div class="library-example"><strong>${escapeHtml(word.example)}</strong><small>${escapeHtml(word.exampleTranslation)}</small></div>
+      <div class="library-meta">${word.transcription ? `<span>${escapeHtml(word.transcription)}</span>` : ''}${word.partOfSpeech ? `<span>${escapeHtml(word.partOfSpeech)}</span>` : ''}<span>${escapeHtml(word.topic)}</span></div>
+      ${word.example ? `<div class="library-example"><strong>${escapeHtml(word.example)}</strong><small>${escapeHtml(word.exampleTranslation || '')}</small></div>` : ''}
       <button type="button" class="${added ? 'library-added' : 'library-add'}" data-action="add-library-word" data-id="${word.id}" ${added ? 'disabled' : ''}>${added ? '✓ Уже в словаре' : '＋ В мой словарь'}</button>
     </article>
   `;
@@ -543,19 +546,24 @@ function wordCard(word) {
 
 function renderStudy() {
   if (!state.session) {
+    const due = dueWords().length;
+    const difficult = state.words.filter((word) => word.status === 'difficult').length;
+    const fresh = state.words.filter((word) => word.status === 'new').length;
     view.innerHTML = `
-      <section class="page-title-row"><div><span class="eyebrow">Практика</span><h1>Занятие</h1><p>Повторяйте слова небольшими подходами.</p></div></section>
-      <section class="study-start-card">
-        <div class="study-orbit"><span>🔊</span><span>ABC</span><span>✍️</span></div>
-        <h2>Готовы начать?</h2>
-        <p>Приложение подберёт до ${state.settings.sessionLength} слов: сначала просроченные, затем новые.</p>
-        <button class="primary-cta" type="button" data-action="start-session"><span><small>Около 3–5 минут</small><strong>Начать занятие</strong></span><span class="cta-arrow">→</span></button>
+      <section class="page-title-row"><div><span class="eyebrow">Умный микс</span><h1>Занятие</h1><p>Приложение само смешает повторение, слабые места и немного нового.</p></div></section>
+      <section class="study-start-card smart-study-card">
+        <div class="study-orbit"><span>🔊</span><span>ABC</span><span>⌨️</span></div>
+        <h2>Без зубрёжки по кругу</h2>
+        <p>Сначала — то, что пора повторить. Затем слабые слова. Новые добавляются маленькими порциями, а хорошо знакомые не лезут в каждое занятие.</p>
+        <div class="smart-mix-preview"><span><strong>${due}</strong><small>пора повторить</small></span><span><strong>${difficult}</strong><small>сложных</small></span><span><strong>${fresh}</strong><small>новых</small></span></div>
+        <button class="primary-cta" type="button" data-action="start-session"><span><small>${state.settings.sessionLength} заданий · около 3–5 минут</small><strong>Начать умное занятие</strong></span><span class="cta-arrow">→</span></button>
       </section>
       <section class="mode-grid">
-        ${modeCard('🔊', 'Слушать', 'Произношение слов и примеров')}
-        ${modeCard('⌨️', 'Печатать', 'Активное вспоминание')}
-        ${modeCard('✓', 'Выбирать', 'Быстрая проверка значения')}
+        ${modeCard('✓', 'Выбор', 'Быстро узнаём значение')}
+        ${modeCard('⌨️', 'Вспомнить', 'Русский → английский без подсказки')}
+        ${modeCard('🔊', 'На слух', 'Слушаем и узнаём слово')}
       </section>
+      <section class="panel learning-logic-panel"><span class="eyebrow">Как это работает</span><h2>Сложность растёт вместе с вами</h2><p>Новое слово сначала знакомится с вами, затем появляется в простом выборе. Когда оно закрепляется, чаще приходят ввод с клавиатуры, аудирование и контекст.</p></section>
     `;
     return;
   }
@@ -565,43 +573,108 @@ function renderStudy() {
     return;
   }
 
-  const current = state.session.words[state.session.index];
-  const progress = Math.round(((state.session.index) / state.session.words.length) * 100);
+  const task = currentStudyTask();
+  if (!task) {
+    completeSession().then(() => renderStudy());
+    return;
+  }
+  const word = state.words.find((item) => item.id === task.wordId);
+  if (!word) {
+    state.session.index += 1;
+    renderStudy();
+    return;
+  }
+
+  const progress = Math.round((state.session.index / Math.max(1, state.session.tasks.length)) * 100);
+  const answeredClass = task.answered ? (task.correct ? 'is-correct' : 'is-wrong') : '';
 
   view.innerHTML = `
     <section class="study-header">
       <button type="button" class="icon-button" data-action="finish-session" aria-label="Закрыть занятие">×</button>
-      <div><strong>${state.session.index + 1} из ${state.session.words.length}</strong><div class="progress-track"><span style="width:${progress}%"></span></div></div>
+      <div><strong>${Math.min(state.session.index + 1, state.session.tasks.length)} из ${state.session.tasks.length}</strong><div class="progress-track"><span style="width:${progress}%"></span></div></div>
       <span class="xp-chip">+${state.session.xp} XP</span>
     </section>
-
-    <article class="flashcard ${state.session.revealed ? 'is-revealed' : ''}">
-      <div class="flashcard-top"><span class="status-pill status-${current.status}">${escapeHtml(current.category || 'Слово')}</span><button type="button" class="icon-button" data-action="speak" data-text="${escapeHtml(current.term)}">🔊</button></div>
-      <div class="flashcard-word"><h1>${escapeHtml(current.term)}</h1><p>${escapeHtml(current.transcription || '')}</p><small>${escapeHtml(current.pronunciation || '')}</small></div>
-      ${state.session.revealed ? `
-        <div class="answer-block"><h2>${escapeHtml(current.translation)}</h2>${current.example ? `<p><strong>${escapeHtml(current.example)}</strong><br><span>${escapeHtml(current.exampleTranslation || '')}</span></p><button type="button" class="listen-example" data-action="speak" data-text="${escapeHtml(current.example)}">🔊 Прослушать пример</button>` : ''}</div>
-      ` : `<button class="reveal-button" type="button" data-action="reveal-answer">Показать перевод</button>`}
+    <article class="smart-task ${answeredClass}">
+      ${renderExercise(task, word)}
+      ${task.answered ? renderAnswerFeedback(task, word) : ''}
     </article>
-
-    ${state.session.revealed ? `<section class="rating-grid">
-      <button type="button" class="rating forget" data-action="rate-answer" data-rating="forget"><span>×</span><strong>Не помню</strong></button>
-      <button type="button" class="rating hard" data-action="rate-answer" data-rating="hard"><span>◔</span><strong>Тяжело</strong></button>
-      <button type="button" class="rating normal" data-action="rate-answer" data-rating="normal"><span>•</span><strong>Нормально</strong></button>
-      <button type="button" class="rating easy" data-action="rate-answer" data-rating="easy"><span>✓</span><strong>Легко</strong></button>
-    </section>` : '<p class="study-hint">Попробуйте сначала вспомнить значение самостоятельно.</p>'}
   `;
 
-  if (state.settings.autoPlay) speak(current.term);
+  if (!task.answered && task.type === 'typing') {
+    setTimeout(() => document.querySelector('#typingAnswer')?.focus(), 40);
+  }
+  if (!task.answered && task.type === 'listening' && (state.settings.autoPlay || !task.playedOnce)) {
+    task.playedOnce = true;
+    setTimeout(() => speak(word.term), 120);
+  }
 }
 
 function modeCard(icon, title, text) {
   return `<article class="mode-card"><span>${icon}</span><strong>${title}</strong><p>${text}</p></article>`;
 }
 
+function currentStudyTask() {
+  return state.session?.tasks?.[state.session.index] || null;
+}
+
+function renderExercise(task, word) {
+  const top = `<div class="smart-task-top"><span class="exercise-chip">${exerciseLabel(task.type)}</span><span class="mastery-chip">${Math.round(Number(word.mastery || 0) * 100)}%</span></div>`;
+
+  if (task.type === 'intro') {
+    return `${top}<div class="intro-card"><span class="eyebrow">Новое слово</span><h1>${escapeHtml(word.term)}</h1>${word.transcription ? `<p class="intro-transcription">${escapeHtml(word.transcription)}</p>` : ''}<button type="button" class="listen-word-big" data-action="speak" data-text="${escapeHtml(word.term)}">🔊 Прослушать</button><h2>${escapeHtml(word.translation)}</h2>${word.pronunciation ? `<small>${escapeHtml(word.pronunciation)}</small>` : ''}${word.example ? `<div class="intro-example"><strong>${escapeHtml(word.example)}</strong><span>${escapeHtml(word.exampleTranslation || '')}</span></div>` : ''}<button type="button" class="primary-cta compact-cta" data-action="intro-next"><span><small>Сейчас вернёмся к нему ещё раз</small><strong>Понятно, дальше</strong></span><span class="cta-arrow">→</span></button></div>`;
+  }
+
+  if (task.type === 'choice') {
+    return `${top}<div class="task-prompt"><small>Выберите перевод</small><h1>${escapeHtml(word.term)}</h1>${word.transcription ? `<p>${escapeHtml(word.transcription)}</p>` : ''}</div>${renderOptions(task)}`;
+  }
+
+  if (task.type === 'reverse') {
+    return `${top}<div class="task-prompt"><small>Как будет по-английски?</small><h2>${escapeHtml(word.translation)}</h2></div>${renderOptions(task)}`;
+  }
+
+  if (task.type === 'listening') {
+    return `${top}<div class="task-prompt listening-prompt"><small>Что вы слышите?</small><button type="button" class="listen-orb" data-action="speak" data-text="${escapeHtml(word.term)}">🔊</button><p>Нажмите, чтобы прослушать ещё раз</p></div>${renderOptions(task)}`;
+  }
+
+  if (task.type === 'context') {
+    return `${top}<div class="task-prompt context-prompt"><small>Вставьте слово в контекст</small><h2>${escapeHtml(makeCloze(word.example || '', word.term))}</h2>${word.exampleTranslation ? `<p>${escapeHtml(word.exampleTranslation)}</p>` : ''}</div>${renderOptions(task)}`;
+  }
+
+  return `${top}<div class="task-prompt"><small>Введите по-английски</small><h2>${escapeHtml(word.translation)}</h2>${word.exampleTranslation ? `<p>${escapeHtml(word.exampleTranslation)}</p>` : ''}</div><div class="typing-box"><input id="typingAnswer" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Ваш ответ"><button type="button" data-action="check-typing">Проверить</button></div>`;
+}
+
+function renderOptions(task) {
+  return `<div class="answer-options">${task.options.map((option, index) => `<button type="button" data-action="answer-option" data-option="${index}">${escapeHtml(option)}</button>`).join('')}</div>`;
+}
+
+function renderAnswerFeedback(task, word) {
+  const correctText = task.type === 'choice' ? word.translation : word.term;
+  return `<div class="answer-feedback ${task.correct ? 'correct' : 'wrong'}"><strong>${task.correct ? 'Верно ✓' : 'Не страшно — закрепим ещё раз'}</strong>${task.correct ? '<span>Идём дальше.</span>' : `<span>Правильный ответ: <b>${escapeHtml(correctText)}</b></span>`}${word.example ? `<small>${escapeHtml(word.example)} — ${escapeHtml(word.exampleTranslation || '')}</small>` : ''}<button type="button" data-action="next-task">Дальше →</button></div>`;
+}
+
+function exerciseLabel(type) {
+  return { intro: 'Знакомство', choice: 'Выбор', reverse: 'Вспоминание', typing: 'Печать', listening: 'Аудирование', context: 'Контекст' }[type] || 'Практика';
+}
+
 async function startSession() {
-  const due = dueWords().sort((a, b) => new Date(a.nextReviewAt) - new Date(b.nextReviewAt));
-  const other = state.words.filter((word) => !due.some((item) => item.id === word.id));
-  const selected = [...due, ...other].slice(0, Math.max(1, Number(state.settings.sessionLength) || 12));
+  const targetTasks = Math.max(6, Number(state.settings.sessionLength) || 12);
+  await ensureSmartNewWords(Math.min(2, Math.max(1, Math.round(targetTasks * 0.18))));
+
+  const previousSessionId = state.sessions.at(-1)?.id || null;
+  const newLimit = Math.min(3, Math.max(1, Math.round(targetTasks * 0.25)));
+  const newPool = state.words
+    .filter((word) => Number(word.seenCount || 0) === 0 || word.status === 'new')
+    .sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+
+  const scored = state.words
+    .filter((word) => !newPool.some((item) => item.id === word.id))
+    .map((word) => ({ word, score: studyPriority(word, previousSessionId) }))
+    .sort((a, b) => b.score - a.score);
+
+  const selectedNew = newPool.slice(0, newLimit);
+  const uniqueTarget = Math.max(4, Math.min(state.words.length, Math.round(targetTasks * 0.75)));
+  const selectedReview = scored.slice(0, Math.max(0, uniqueTarget - selectedNew.length)).map((item) => item.word);
+  let selected = mixWordGroups(selectedReview, selectedNew);
 
   if (!selected.length) {
     showToast('Сначала добавьте хотя бы одно слово');
@@ -609,85 +682,345 @@ async function startSession() {
     return;
   }
 
+  const tasks = selected.map((word) => createStudyTask(word));
+  // Новое слово получит ещё одно задание после знакомства. Остаток добиваем
+  // разными упражнениями на уже знакомых словах, а не бесконечным показом одной карточки.
+  let expectedTasks = tasks.length + selectedNew.length;
+  let boosterIndex = 0;
+  while (expectedTasks < targetTasks && selectedReview.length) {
+    const word = selectedReview[boosterIndex % selectedReview.length];
+    tasks.push(createStudyTask(word, { forceType: chooseExerciseType(word, true) }));
+    boosterIndex += 1;
+    expectedTasks += 1;
+  }
+  const sessionId = uid();
   state.session = {
-    id: uid(),
+    id: sessionId,
     startedAt: new Date().toISOString(),
     words: selected,
+    tasks,
     index: 0,
-    revealed: false,
     correct: 0,
     mistakes: 0,
+    answered: 0,
     xp: 0,
     finished: false,
-    xpEvents: []
+    xpEvents: [],
+    repeatCounts: {}
   };
   navigate('study');
 }
 
-function revealAnswer() {
-  if (!state.session) return;
-  state.session.revealed = true;
+function mixWordGroups(reviewWords, newWords) {
+  const reviews = [...reviewWords];
+  const fresh = [...newWords];
+  const result = [];
+  let freshIndex = 0;
+  for (let i = 0; i < reviews.length; i += 1) {
+    result.push(reviews[i]);
+    if (freshIndex < fresh.length && (i === 1 || (i > 1 && (i + 1) % 4 === 0))) result.push(fresh[freshIndex++]);
+  }
+  while (freshIndex < fresh.length) result.push(fresh[freshIndex++]);
+  return result;
+}
+
+function studyPriority(word, previousSessionId) {
+  const now = Date.now();
+  const dueAt = new Date(word.nextReviewAt || 0).getTime();
+  const overdueHours = Math.max(0, (now - dueAt) / 3_600_000);
+  const isDue = dueAt <= now;
+  let score = isDue ? 55 + Math.min(35, Math.log2(overdueHours + 1) * 6) : 0;
+  if (word.status === 'difficult') score += 35;
+  if (word.important) score += 12;
+  score += Math.min(24, Number(word.wrongCount || 0) * 3);
+  score += Math.max(0, 12 - Number(word.consecutiveCorrect || 0) * 2);
+  score += (1 - Number(word.mastery || 0)) * 18;
+  if (word.lastSessionId && word.lastSessionId === previousSessionId && !isDue && word.status !== 'difficult') score -= 60;
+  if (word.lastPresentedAt) {
+    const hoursAgo = (now - new Date(word.lastPresentedAt).getTime()) / 3_600_000;
+    if (hoursAgo < 12 && !isDue) score -= 25;
+  }
+  if (word.status === 'learned' && !isDue) score -= 22;
+  return score + Math.random() * 3;
+}
+
+function createStudyTask(word, { forceType = null, isRepeat = false } = {}) {
+  const type = forceType || chooseExerciseType(word, isRepeat);
+  const task = { id: uid(), wordId: word.id, type, answered: false, correct: null, isRepeat };
+  if (['choice', 'reverse', 'listening', 'context'].includes(type)) task.options = buildOptions(word, type);
+  return task;
+}
+
+function chooseExerciseType(word, isRepeat = false) {
+  const seen = Number(word.seenCount || 0);
+  const mastery = Number(word.mastery || 0);
+  if (seen === 0 && !isRepeat) return 'intro';
+
+  let pool;
+  if (isRepeat || word.status === 'difficult' || mastery < 0.3) pool = ['choice', 'reverse', 'listening'];
+  else if (mastery < 0.62) pool = ['choice', 'reverse', 'listening', 'typing'];
+  else pool = ['reverse', 'typing', 'listening', ...(word.example && word.example.toLowerCase().includes(word.term.toLowerCase()) ? ['context'] : [])];
+
+  const filtered = pool.filter((type) => type !== word.lastExercise);
+  const candidates = filtered.length ? filtered : pool;
+  return candidates[Math.floor(Math.random() * candidates.length)];
+}
+
+function buildOptions(word, type) {
+  const answer = type === 'choice' ? word.translation : word.term;
+  const field = type === 'choice' ? 'translation' : 'term';
+  const candidates = [...state.words, ...LIBRARY_WORDS]
+    .filter((item) => item.term?.toLowerCase() !== word.term.toLowerCase())
+    .sort((a, b) => {
+      const topicA = a.topic === word.topic || a.category === word.category ? 1 : 0;
+      const topicB = b.topic === word.topic || b.category === word.category ? 1 : 0;
+      return topicB - topicA || Math.random() - 0.5;
+    })
+    .map((item) => String(item[field] || '').trim())
+    .filter(Boolean);
+  const unique = [];
+  const seen = new Set([answer.toLowerCase()]);
+  for (const candidate of candidates) {
+    const key = candidate.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(candidate);
+    }
+    if (unique.length >= 3) break;
+  }
+  const options = [answer, ...unique];
+  while (options.length < 4) options.push('—');
+  return shuffle(options);
+}
+
+function shuffle(items) {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+function makeCloze(example, term) {
+  if (!example || !term) return example;
+  return example.replace(new RegExp(escapeRegExp(term), 'i'), '_____');
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function finishIntroTask() {
+  const task = currentStudyTask();
+  if (!task || task.type !== 'intro') return;
+  const word = state.words.find((item) => item.id === task.wordId);
+  if (!word) return;
+
+  const now = new Date().toISOString();
+  word.introducedAt ||= now;
+  word.lastPresentedAt = now;
+  word.lastSessionId = state.session.id;
+  word.lastExercise = 'intro';
+  word.updatedAt = now;
+  word.syncState = 'pending';
+  await putOne('words', word);
+  state.words = state.words.map((item) => item.id === word.id ? { ...word } : item);
+
+  const insertAt = Math.min(state.session.tasks.length, state.session.index + 3);
+  state.session.tasks.splice(insertAt, 0, createStudyTask(word, { forceType: 'choice' }));
+  state.session.index += 1;
   renderStudy();
 }
 
-async function rateAnswer(rating) {
-  if (!state.session) return;
-  const word = state.session.words[state.session.index];
-  const now = Date.now();
-  const oldLevel = levelData(state.profile.totalXp || 0).level;
-  let earned = 0;
-  let intervalDays = Number(word.intervalDays || 0);
+async function answerOption(optionIndex) {
+  const task = currentStudyTask();
+  if (!task || task.answered) return;
+  const word = state.words.find((item) => item.id === task.wordId);
+  if (!word) return;
+  const chosen = task.options?.[optionIndex];
+  const expected = task.type === 'choice' ? word.translation : word.term;
+  await evaluateStudyAnswer(task, word, normalizeAnswer(chosen) === normalizeAnswer(expected), chosen || '');
+}
 
-  if (rating === 'forget') {
-    word.wrongCount += 1;
-    word.status = 'difficult';
-    word.nextReviewAt = new Date(now + 60 * 60 * 1000).toISOString();
+async function checkTypingAnswer() {
+  const task = currentStudyTask();
+  if (!task || task.answered || task.type !== 'typing') return;
+  const word = state.words.find((item) => item.id === task.wordId);
+  const input = document.querySelector('#typingAnswer');
+  if (!word || !input) return;
+  const value = String(input.value || '').trim();
+  if (!value) {
+    showToast('Введите ответ');
+    return;
+  }
+  await evaluateStudyAnswer(task, word, normalizeAnswer(value) === normalizeAnswer(word.term), value);
+}
+
+function normalizeAnswer(value) {
+  return String(value || '').trim().toLowerCase().replace(/[’‘]/g, "'").replace(/[.,!?;:]+$/g, '').replace(/\s+/g, ' ');
+}
+
+async function evaluateStudyAnswer(task, word, correct, answer) {
+  if (task.answered) return;
+  task.answered = true;
+  task.correct = correct;
+  task.answer = answer;
+  const oldLevel = levelData(state.profile.totalXp || 0).level;
+  const wasLearned = word.status === 'learned';
+  const earned = updateWordMemory(word, correct, task.type);
+  const masteryBonus = !wasLearned && word.status === 'learned' ? 5 : 0;
+  const repeatXp = task.isRepeat ? Math.min(1, earned) : earned;
+  const totalXp = repeatXp + masteryBonus;
+
+  state.session.answered += 1;
+  if (correct) state.session.correct += 1;
+  else {
     state.session.mistakes += 1;
-  } else if (rating === 'hard') {
-    earned = 1;
-    intervalDays = Math.max(1, intervalDays * 1.2 || 1);
-    word.correctCount += 1;
-    word.status = word.correctCount >= 4 ? 'learned' : 'learning';
-    word.nextReviewAt = new Date(now + intervalDays * DAY).toISOString();
-    state.session.correct += 1;
-  } else if (rating === 'normal') {
-    earned = 2;
-    intervalDays = Math.max(2, intervalDays * 2.2 || 2);
-    word.correctCount += 1;
-    word.status = word.correctCount >= 3 ? 'learned' : 'learning';
-    word.nextReviewAt = new Date(now + intervalDays * DAY).toISOString();
-    state.session.correct += 1;
-  } else {
-    earned = 3;
-    intervalDays = Math.max(4, intervalDays * 3.2 || 4);
-    word.correctCount += 1;
-    word.status = word.correctCount >= 2 ? 'learned' : 'learning';
-    word.nextReviewAt = new Date(now + intervalDays * DAY).toISOString();
-    state.session.correct += 1;
+    const repeats = Number(state.session.repeatCounts[word.id] || 0);
+    if (repeats < 2) {
+      state.session.repeatCounts[word.id] = repeats + 1;
+      const insertAt = Math.min(state.session.tasks.length, state.session.index + 3);
+      state.session.tasks.splice(insertAt, 0, createStudyTask(word, { forceType: repeats ? 'reverse' : 'choice', isRepeat: true }));
+    }
   }
 
-  word.intervalDays = intervalDays;
-  word.lastReviewedAt = new Date().toISOString();
+  word.lastSessionId = state.session.id;
+  word.lastPresentedAt = new Date().toISOString();
+  word.lastExercise = task.type;
   word.updatedAt = new Date().toISOString();
   word.syncState = 'pending';
 
-  state.session.xp += earned;
-  state.session.xpEvents.push({ wordId: word.id, rating, xp: earned });
-  state.profile.totalXp = (state.profile.totalXp || 0) + earned;
+  state.session.xp += totalXp;
+  state.session.xpEvents.push({ wordId: word.id, exercise: task.type, correct, xp: totalXp });
+  state.profile.totalXp = (state.profile.totalXp || 0) + totalXp;
   updateStreak();
 
   await Promise.all([putOne('words', word), putOne('profile', state.profile)]);
   state.words = state.words.map((item) => item.id === word.id ? { ...word } : item);
 
-  state.session.index += 1;
-  state.session.revealed = false;
-  if (state.session.index >= state.session.words.length) {
-    await completeSession();
-  }
-
   const newLevel = levelData(state.profile.totalXp || 0).level;
   if (newLevel > oldLevel) showToast(`Новый уровень: ${newLevel}! 🎉`);
   renderStudy();
+}
+
+function updateWordMemory(word, correct, exerciseType) {
+  const now = Date.now();
+  word.seenCount = Number(word.seenCount || 0) + 1;
+  word.introducedAt ||= new Date(now).toISOString();
+  let stability = Math.max(0.35, Number(word.stabilityDays || word.intervalDays || 0.35));
+  let difficulty = Math.min(1, Math.max(0.1, Number(word.difficulty || 0.5)));
+  let earned = 0;
+
+  if (!correct) {
+    word.wrongCount = Number(word.wrongCount || 0) + 1;
+    word.lapses = Number(word.lapses || 0) + 1;
+    word.consecutiveCorrect = 0;
+    difficulty = Math.min(1, difficulty + 0.09);
+    stability = Math.max(0.2, stability * 0.42);
+    const relearnHours = word.seenCount <= 3 ? 3 : 8;
+    word.nextReviewAt = new Date(now + relearnHours * 3_600_000).toISOString();
+  } else {
+    word.correctCount = Number(word.correctCount || 0) + 1;
+    word.consecutiveCorrect = Number(word.consecutiveCorrect || 0) + 1;
+    const strength = { choice: 1.65, reverse: 1.9, listening: 1.85, typing: 2.35, context: 2.15 }[exerciseType] || 1.7;
+    const streakBonus = 1 + Math.min(0.35, word.consecutiveCorrect * 0.06);
+    stability = Math.min(365, Math.max(0.8, stability * strength * streakBonus));
+    difficulty = Math.max(0.1, difficulty - 0.035);
+    const fuzz = 0.92 + Math.random() * 0.16;
+    word.nextReviewAt = new Date(now + stability * fuzz * DAY).toISOString();
+    earned = { choice: 1, reverse: 2, listening: 2, typing: 3, context: 3 }[exerciseType] || 1;
+  }
+
+  word.stabilityDays = stability;
+  word.intervalDays = stability;
+  word.difficulty = difficulty;
+  word.mastery = calculateMastery(word);
+  if (word.seenCount === 0) word.status = 'new';
+  else if (word.lapses >= 2 && word.mastery < 0.58) word.status = 'difficult';
+  else if (word.mastery >= 0.72 && stability >= 7 && word.consecutiveCorrect >= 2) word.status = 'learned';
+  else word.status = 'learning';
+  return earned;
+}
+
+function calculateMastery(word) {
+  const correct = Number(word.correctCount || 0);
+  const wrong = Number(word.wrongCount || 0);
+  const attempts = correct + wrong;
+  if (!attempts) return 0;
+  const accuracy = correct / attempts;
+  const stability = Math.max(0, Number(word.stabilityDays || word.intervalDays || 0));
+  const intervalScore = Math.min(1, Math.log2(stability + 1) / 5);
+  const streakScore = Math.min(1, Number(word.consecutiveCorrect || 0) / 4);
+  return Math.max(0, Math.min(1, accuracy * 0.52 + intervalScore * 0.33 + streakScore * 0.15));
+}
+
+async function advanceStudyTask() {
+  const task = currentStudyTask();
+  if (!task?.answered) return;
+  state.session.index += 1;
+  if (state.session.index >= state.session.tasks.length) await completeSession();
+  renderStudy();
+}
+
+async function ensureSmartNewWords(maxCount) {
+  if (!state.settings.smartNewWords || maxCount <= 0) return;
+  const today = todayKey();
+  const addedToday = state.words.filter((word) => word.source === 'library-auto' && word.createdAt?.startsWith(today)).length;
+  const backlog = state.words.filter((word) => Number(word.seenCount || 0) === 0 || word.status === 'new').length;
+  const allowance = Math.max(0, Number(state.settings.newWordsPerDay || 5) - addedToday);
+  const count = Math.min(maxCount, allowance, Math.max(0, 6 - backlog));
+  if (!count) return;
+
+  const existing = new Set(state.words.map((word) => word.term.trim().toLowerCase()));
+  const candidates = LIBRARY_WORDS.filter((word) => !existing.has(word.term.toLowerCase()) && levelAllowed(word.level));
+  const picked = pickVariedNewWords(candidates, count);
+  const now = new Date().toISOString();
+  for (const source of picked) {
+    const word = normalizeWord({
+      ...source,
+      id: uid(),
+      libraryId: source.id,
+      category: source.topic,
+      status: 'new',
+      source: 'library-auto',
+      createdAt: now,
+      updatedAt: now,
+      nextReviewAt: now,
+      syncState: 'pending'
+    });
+    await putOne('words', word);
+    state.words.unshift(word);
+  }
+}
+
+function levelAllowed(level) {
+  const setting = state.settings.learningLevel || 'A1-B1';
+  if (setting === 'ALL') return true;
+  if (setting === 'A1-A2') return ['A1', 'A2'].includes(level);
+  if (setting === 'B1-B2') return ['B1', 'B2'].includes(level);
+  return ['A1', 'A2', 'B1'].includes(level);
+}
+
+function pickVariedNewWords(candidates, count) {
+  const levelRank = { A1: 1, A2: 2, B1: 3, B2: 4, C1: 5 };
+  const ordered = [...candidates].sort((a, b) => (levelRank[a.level] || 9) - (levelRank[b.level] || 9) || Math.random() - 0.5);
+  const result = [];
+  const topics = new Set();
+  for (const word of ordered) {
+    if (!topics.has(word.topic)) {
+      result.push(word);
+      topics.add(word.topic);
+    }
+    if (result.length >= count) break;
+  }
+  if (result.length < count) {
+    for (const word of ordered) {
+      if (!result.some((item) => item.id === word.id)) result.push(word);
+      if (result.length >= count) break;
+    }
+  }
+  return result;
 }
 
 function updateStreak() {
@@ -699,6 +1032,7 @@ function updateStreak() {
 }
 
 async function completeSession() {
+  if (!state.session || state.session.finished) return;
   state.session.xp += 15;
   state.profile.totalXp = (state.profile.totalXp || 0) + 15;
   state.session.finished = true;
@@ -708,10 +1042,12 @@ async function completeSession() {
     id: state.session.id,
     startedAt: state.session.startedAt,
     completedAt: state.session.completedAt,
-    reviewed: state.session.words.length,
+    reviewed: state.session.answered,
+    uniqueWords: state.session.words.length,
     correct: state.session.correct,
     mistakes: state.session.mistakes,
     xp: state.session.xp,
+    wordIds: state.session.words.map((word) => word.id),
     xpEvents: state.session.xpEvents,
     syncState: 'pending'
   };
@@ -720,15 +1056,18 @@ async function completeSession() {
 }
 
 function renderSessionResult() {
-  const accuracy = Math.round((state.session.correct / state.session.words.length) * 100);
+  const attempts = Math.max(1, state.session.correct + state.session.mistakes);
+  const accuracy = Math.round((state.session.correct / attempts) * 100);
   const level = levelData(state.profile.totalXp || 0);
+  const repeats = Math.max(0, state.session.tasks.length - state.session.words.length);
   view.innerHTML = `
     <section class="result-card">
       <div class="result-icon">✓</div>
       <span class="eyebrow">Занятие завершено</span>
-      <h1>Отличная работа!</h1>
-      <p>Каждое повторение делает нужные слова доступнее в реальной речи.</p>
-      <div class="result-stats"><span><strong>${state.session.words.length}</strong><small>повторено</small></span><span><strong>${accuracy}%</strong><small>точность</small></span><span><strong>+${state.session.xp}</strong><small>XP</small></span></div>
+      <h1>${accuracy >= 85 ? 'Сильно!' : accuracy >= 65 ? 'Хороший подход!' : 'Вот где растёт память!'}</h1>
+      <p>${state.session.mistakes ? 'Ошибки уже отправлены на более раннее повторение — именно они помогут следующему занятию стать точнее.' : 'Без ошибок. Следующие интервалы увеличены, поэтому эти слова не будут надоедать слишком часто.'}</p>
+      <div class="result-stats"><span><strong>${state.session.words.length}</strong><small>разных слов</small></span><span><strong>${accuracy}%</strong><small>точность</small></span><span><strong>+${state.session.xp}</strong><small>XP</small></span></div>
+      ${repeats ? `<div class="smart-result-note">↻ Дополнительных закреплений в занятии: <strong>${repeats}</strong></div>` : ''}
       <div class="level-result"><div><strong>Уровень ${level.level} · ${level.rank.name}</strong><small>${level.currentXp} / ${level.requiredXp} XP</small></div><div class="progress-track"><span style="width:${level.percent}%"></span></div></div>
       <button class="primary-cta" type="button" data-action="finish-session"><span><small>Продолжить обучение</small><strong>Вернуться на главную</strong></span><span class="cta-arrow">→</span></button>
     </section>
@@ -797,36 +1136,27 @@ function sessionsLastDays(days) {
 
 function renderProfile() {
   const level = levelData(state.profile.totalXp || 0);
-  const connected = state.profile.accountStatus === 'authenticated';
-  const serverReady = authConfigured(state.settings.apiBaseUrl);
-
   view.innerHTML = `
     <section class="profile-hero">
       <div class="avatar">${escapeHtml((state.profile.displayName || 'Г').slice(0, 1).toUpperCase())}</div>
-      <div><span class="eyebrow">Профиль</span><h1>${escapeHtml(state.profile.displayName)}</h1><p>${connected ? escapeHtml(state.profile.email) : 'Гостевой режим · данные хранятся локально'}</p></div>
+      <div><span class="eyebrow">Профиль</span><h1>${escapeHtml(state.profile.displayName)}</h1><p>Локальный режим · данные хранятся на этом устройстве</p></div>
       <span class="profile-level">${level.rank.icon} ${level.level}</span>
     </section>
 
-    <section class="account-card ${connected ? 'is-connected' : ''}">
-      <span class="account-icon">${connected ? '✓' : '☁'}</span>
-      <div class="grow">
-        <strong>${connected ? 'Аккаунт подключён' : 'Подключите аккаунт'}</strong>
-        <p>${connected
-          ? 'Вход уже работает. Слова и прогресс остаются локально; облачную синхронизацию подключим следующим этапом.'
-          : serverReady
-            ? 'Войдите или создайте аккаунт. Текущий словарь и прогресс на устройстве сохранятся.'
-            : 'Экран аккаунта готов. Для настоящего входа осталось подключить отдельный Cloudflare Worker и D1.'}</p>
-      </div>
-      <button type="button" class="secondary-button" data-action="account-info">${connected ? 'Управление' : 'Войти'}</button>
-    </section>
-
     <section class="settings-panel">
-      <h2>Обучение</h2>
-      ${settingSelect('Новых слов в день', 'Небольшая ежедневная порция', 'newWordsPerDay', state.settings.newWordsPerDay, [5, 10, 15, 20])}
-      ${settingSelect('Длительность занятия', 'Количество карточек за подход', 'sessionLength', state.settings.sessionLength, [5, 8, 12, 20])}
+      <h2>Умное обучение</h2>
+      ${settingToggle('Автоподбор новых слов', 'Добавлять новые слова из библиотеки небольшими порциями', 'smartNewWords', state.settings.smartNewWords)}
+      ${settingSelectText('Уровень новых слов', 'Какую сложность брать из общей библиотеки', 'learningLevel', state.settings.learningLevel, [
+        { value: 'A1-A2', label: 'A1–A2 · базовый' },
+        { value: 'A1-B1', label: 'A1–B1 · повседневный' },
+        { value: 'B1-B2', label: 'B1–B2 · уверенный' },
+        { value: 'ALL', label: 'Все уровни' }
+      ])}
+      ${settingSelect('Новых слов в день', 'Лимит, а не обязательная норма', 'newWordsPerDay', state.settings.newWordsPerDay, [3, 5, 8, 10])}
+      ${settingSelect('Длительность занятия', 'Целевое число заданий за подход', 'sessionLength', state.settings.sessionLength, [8, 12, 16, 20])}
       ${settingSelectText('Английский голос', 'Основной вариант произношения', 'voiceLang', state.settings.voiceLang, [{ value: 'en-US', label: 'Американский' }, { value: 'en-GB', label: 'Британский' }])}
       ${settingSelect('Скорость речи', 'Можно замедлить произношение', 'speechRate', state.settings.speechRate, [0.65, 0.8, 0.85, 1])}
-      ${settingToggle('Автовоспроизведение', 'Произносить слово при открытии карточки', 'autoPlay', state.settings.autoPlay)}
+      ${settingToggle('Автовоспроизведение', 'Произносить слово в заданиях на слух', 'autoPlay', state.settings.autoPlay)}
     </section>
 
     <section class="settings-panel">
@@ -837,7 +1167,7 @@ function renderProfile() {
       <input id="importFile" type="file" accept="application/json" hidden>
     </section>
 
-    <section class="version-card"><span>English Vocabulary</span><strong>Версия ${APP_VERSION}</strong><small>IndexedDB · PWA offline-first · ${serverReady ? 'Auth API подключён' : 'Auth API ожидает подключения'}</small></section>
+    <section class="version-card"><span>English Vocabulary</span><strong>Версия ${APP_VERSION}</strong><small>Умный микс · интервальные повторения · IndexedDB offline-first</small></section>
   `;
 }
 
@@ -965,199 +1295,6 @@ function openLevelModal() {
     </section>
   `;
   document.body.classList.add('modal-open');
-}
-
-function openAccountModal(mode = 'login') {
-  const connected = state.profile.accountStatus === 'authenticated';
-  const configured = authConfigured(state.settings.apiBaseUrl);
-
-  if (connected) {
-    modalRoot.innerHTML = `
-      <div class="modal-backdrop" data-action="close-modal"></div>
-      <section class="modal-sheet compact-sheet" role="dialog" aria-modal="true">
-        <div class="modal-handle"></div>
-        <header><div><span class="eyebrow">Аккаунт</span><h2>Вы вошли</h2></div><button type="button" class="icon-button" data-action="close-modal">×</button></header>
-        <div class="auth-connected">
-          <div class="auth-avatar">${escapeHtml((state.profile.displayName || 'U').slice(0,1).toUpperCase())}</div>
-          <div><strong>${escapeHtml(state.profile.displayName)}</strong><small>${escapeHtml(state.profile.email)}</small></div>
-        </div>
-        <div class="feature-stack">
-          <div><span>✓</span><p><strong>Локальные данные сохранены</strong><small>Ваш словарь, XP и история занятий остались в IndexedDB этого устройства.</small></p></div>
-          <div><span>→</span><p><strong>Следом — синхронизация</strong><small>В следующем серверном этапе свяжем локальные изменения с этим аккаунтом на всех устройствах.</small></p></div>
-        </div>
-        <button type="button" class="danger-button" data-action="logout-account">Выйти из аккаунта</button>
-      </section>
-    `;
-    document.body.classList.add('modal-open');
-    return;
-  }
-
-  const registerMode = mode === 'register';
-  modalRoot.innerHTML = `
-    <div class="modal-backdrop" data-action="close-modal"></div>
-    <section class="modal-sheet compact-sheet" role="dialog" aria-modal="true">
-      <div class="modal-handle"></div>
-      <header><div><span class="eyebrow">Аккаунт</span><h2>${registerMode ? 'Создать аккаунт' : 'Войти'}</h2></div><button type="button" class="icon-button" data-action="close-modal">×</button></header>
-
-      <div class="auth-tabs">
-        <button type="button" class="${!registerMode ? 'is-active' : ''}" data-action="auth-mode" data-mode="login">Войти</button>
-        <button type="button" class="${registerMode ? 'is-active' : ''}" data-action="auth-mode" data-mode="register">Регистрация</button>
-      </div>
-
-      ${configured ? '' : `
-        <div class="auth-server-note">
-          <strong>Сервер аккаунтов ещё не подключён</strong>
-          <small>Интерфейс и серверный код уже готовы. Осталось один раз создать отдельные Cloudflare Worker + D1 и прописать адрес API.</small>
-        </div>
-      `}
-
-      <form id="authForm" class="auth-form" onsubmit="return false" autocomplete="on">
-        ${registerMode ? authField('Имя', 'displayName', 'text', 'Никита', 'name') : ''}
-        ${authField('Email', 'email', 'email', 'name@example.com', 'email')}
-        ${authField('Пароль', 'password', 'password', 'Минимум 8 символов', registerMode ? 'new-password' : 'current-password')}
-        ${registerMode ? authField('Повторите пароль', 'confirmPassword', 'password', 'Ещё раз', 'new-password') : ''}
-        <p class="auth-preserve-note">Ваш текущий словарь и прогресс <strong>не удаляются</strong> при входе или регистрации.</p>
-        <button type="button" class="primary-cta auth-submit" data-action="submit-auth" data-mode="${registerMode ? 'register' : 'login'}" ${configured ? '' : 'disabled'}>
-          <span><small>${registerMode ? 'Новый аккаунт' : 'Существующий аккаунт'}</small><strong>${registerMode ? 'Создать аккаунт' : 'Войти'}</strong></span>
-          <span class="cta-arrow">→</span>
-        </button>
-      </form>
-    </section>
-  `;
-  document.body.classList.add('modal-open');
-}
-
-function authField(label, name, type, placeholder, autocomplete) {
-  return `<label class="form-field"><span>${label}</span><input name="${name}" type="${type}" placeholder="${placeholder}" autocomplete="${autocomplete}" required></label>`;
-}
-
-async function restoreAuthState() {
-  const session = await loadAuthSession();
-  if (!session?.token || !session?.user) {
-    if (state.profile.accountStatus === 'authenticated') {
-      state.profile.accountStatus = 'guest';
-      state.profile.email = '';
-      delete state.profile.accountUserId;
-      await putOne('profile', state.profile);
-    }
-    return;
-  }
-
-  applyAuthenticatedUser(session.user, false);
-
-  if (!navigator.onLine || !authConfigured(state.settings.apiBaseUrl)) return;
-
-  try {
-    const payload = await fetchCurrentUser(state.settings.apiBaseUrl, session.token);
-    applyAuthenticatedUser(payload.user, false);
-    await putOne('profile', state.profile);
-  } catch (error) {
-    if (error.status === 401) {
-      await clearAuthSession();
-      state.profile.accountStatus = 'guest';
-      state.profile.email = '';
-      delete state.profile.accountUserId;
-      await putOne('profile', state.profile);
-    }
-  }
-}
-
-function applyAuthenticatedUser(user, persist = true) {
-  state.profile = {
-    ...state.profile,
-    accountStatus: 'authenticated',
-    accountUserId: user.id,
-    displayName: user.displayName || state.profile.displayName || 'Пользователь',
-    email: user.email || '',
-    syncState: 'pending'
-  };
-  if (persist) return putOne('profile', state.profile);
-}
-
-async function submitAuthForm(mode) {
-  const form = document.querySelector('#authForm');
-  if (!form) return;
-  if (!navigator.onLine) {
-    showToast('Для первого входа нужен интернет');
-    return;
-  }
-  if (!authConfigured(state.settings.apiBaseUrl)) {
-    showToast('Сервер аккаунтов ещё не подключён');
-    return;
-  }
-
-  const data = new FormData(form);
-  const email = String(data.get('email') || '').trim();
-  const password = String(data.get('password') || '');
-  const button = form.querySelector('.auth-submit');
-
-  if (!email || !password) {
-    showToast('Заполните email и пароль');
-    return;
-  }
-  if (password.length < 8) {
-    showToast('Пароль должен быть не короче 8 символов');
-    return;
-  }
-
-  let displayName = '';
-  if (mode === 'register') {
-    displayName = String(data.get('displayName') || '').trim();
-    const confirmPassword = String(data.get('confirmPassword') || '');
-    if (displayName.length < 2) {
-      showToast('Введите имя');
-      return;
-    }
-    if (password !== confirmPassword) {
-      showToast('Пароли не совпадают');
-      return;
-    }
-  }
-
-  const original = button?.innerHTML;
-  if (button) {
-    button.disabled = true;
-    button.innerHTML = '<span><small>Связываемся с сервером</small><strong>Подождите…</strong></span><span class="cta-arrow">…</span>';
-  }
-
-  try {
-    const payload = mode === 'register'
-      ? await registerAccount(state.settings.apiBaseUrl, { displayName, email, password })
-      : await loginAccount(state.settings.apiBaseUrl, { email, password });
-
-    await applyAuthenticatedUser(payload.user);
-    closeModal();
-    showToast(mode === 'register' ? 'Аккаунт создан' : 'Вход выполнен');
-    render();
-  } catch (error) {
-    showToast(error.message || 'Не удалось войти');
-    if (button) {
-      button.disabled = false;
-      button.innerHTML = original;
-    }
-  }
-}
-
-async function logoutAccount() {
-  const session = await loadAuthSession();
-  try {
-    if (navigator.onLine && session?.token) {
-      await logoutAccountRemote(state.settings.apiBaseUrl, session.token);
-    }
-  } catch {
-    // Локальный выход всё равно выполняется.
-  }
-
-  await clearAuthSession();
-  state.profile.accountStatus = 'guest';
-  state.profile.displayName = 'Гость';
-  state.profile.email = '';
-  state.profile.syncState = 'local';
-  delete state.profile.accountUserId;
-  await putOne('profile', state.profile);
-  closeModal();
-  showToast('Вы вышли из аккаунта');
-  render();
 }
 
 function speak(text) {

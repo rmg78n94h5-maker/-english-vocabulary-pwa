@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'english-vocabulary-cache-v0.3.0';
+const CACHE_VERSION = 'english-vocabulary-cache-v0.4.0';
 const APP_SHELL = [
   './',
   './index.html',
@@ -7,8 +7,6 @@ const APP_SHELL = [
   './js/app.js',
   './js/db.js',
   './js/library.js',
-  './js/config.js',
-  './js/auth.js',
   './assets/icon.svg',
   './assets/icon-maskable.svg',
   './assets/apple-touch-icon.png',
